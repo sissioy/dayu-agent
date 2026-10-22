@@ -59,6 +59,7 @@ from dayu.cli.commands.init import (
     _write_env_windows,
     _write_ollama_catalog_entries,
     SEC_USER_AGENT_ENV,
+    TAVILY_MCP_AUTH_KEY_ENV,
     run_init_command,
 )
 
@@ -1956,6 +1957,90 @@ class TestPromptOptionalSearchKeys:
         result = _prompt_optional_search_keys()
         assert len(result) >= 1
 
+    def test_tavily_mcp_auth_key_is_available_from_init(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """工作区启用 Tavily MCP 时 init 应收集代理认证 Key。
+
+        Args:
+            tmp_path: pytest 临时目录。
+            monkeypatch: pytest 环境与输入替换 fixture。
+
+        Returns:
+            无。
+
+        Raises:
+            AssertionError: init 未暴露 Tavily MCP 认证入口时抛出。
+        """
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "web_tools_config": {
+                        "tavily_mcp": {
+                            "command": "npx",
+                            "args": ["mcp-remote", "https://example.com/mcp"],
+                            "tool_name": "tavily-search",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.delenv(TAVILY_MCP_AUTH_KEY_ENV, raising=False)
+        for key in ("TAVILY_API_KEY", "SERPER_API_KEY", "FMP_API_KEY"):
+            monkeypatch.setenv(key, "configured")
+        monkeypatch.setattr("builtins.input", lambda *_args: "proxy-key")
+
+        assert _prompt_optional_search_keys(config_dir=config_dir) == [
+            (TAVILY_MCP_AUTH_KEY_ENV, "proxy-key")
+        ]
+
+    def test_tavily_mcp_auth_key_already_set_is_not_requested(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """环境已有 AUTH_KEY 时 init 应确认配置并跳过重复输入。
+
+        Args:
+            tmp_path: pytest 临时目录。
+            monkeypatch: pytest 环境与输入替换 fixture。
+            capsys: pytest 标准输出捕获 fixture。
+
+        Returns:
+            无。
+
+        Raises:
+            AssertionError: init 仍索取密钥或未显示配置状态时抛出。
+        """
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "run.json").write_text(
+            json.dumps({"web_tools_config": {"tavily_mcp": {"tool_name": "tavily-search"}}}),
+            encoding="utf-8",
+        )
+        for key in (
+            TAVILY_MCP_AUTH_KEY_ENV,
+            "TAVILY_API_KEY",
+            "SERPER_API_KEY",
+            "FMP_API_KEY",
+        ):
+            monkeypatch.setenv(key, "configured")
+        monkeypatch.setattr(
+            "builtins.input",
+            lambda *_args: pytest.fail("已配置的联网检索凭据不应再次询问"),
+        )
+
+        assert _prompt_optional_search_keys(config_dir=config_dir) == []
+        assert "AUTH_KEY（Tavily MCP 代理）" in capsys.readouterr().out
+
 
 # --------------------------------------------------------------------------- #
 #  _is_hf_hub_reachable — 异常分支
@@ -2483,7 +2568,10 @@ class TestInitPrewarm:
         )
         monkeypatch.setattr("dayu.cli.commands.init._prompt_api_key", lambda _key: "sk-test")
         monkeypatch.setattr("dayu.cli.commands.init._persist_env_var", lambda _k, _v: ("~/.zshrc", False))
-        monkeypatch.setattr("dayu.cli.commands.init._prompt_optional_search_keys", lambda: [])
+        monkeypatch.setattr(
+            "dayu.cli.commands.init._prompt_optional_search_keys",
+            lambda **_kwargs: [],
+        )
         monkeypatch.setattr("dayu.cli.commands.init._prompt_huggingface_config", lambda: [])
 
         prewarm_calls: list[tuple[Path, Path]] = []

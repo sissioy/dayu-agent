@@ -16,7 +16,8 @@
   - `tests/engine/test_prompt_assets.py` 与 `tests/engine/test_prompt_composer.py` 共同守住 scene manifest 的当前默认模型边界：推理/交互类 scene 默认应对齐 `mimo-v2.5-pro-thinking-plan`，写作类 scene 默认应对齐 `mimo-v2.5-pro-plan`；若测试仍断言旧 `pro` 默认，会把真实 prompt 配置漂移误报成回归
   - `tests/engine/test_write_pipeline.py` 还要守住 `scene_executor.py` 的共享重试边界：write/overview/infer/decision/fix/regenerate/raw prompt、confirm 和 repair 都必须复用同一套 LLM 执行失败重试语义；取消不得重试，解析失败只在 confirm/repair 这类声明了解析契约的路径重试，且最终错误消息必须保留各 scene 自身语义
   - `tests/engine/test_context_budget.py` 负责守住 `dayu.engine.context_budget` 的真源边界，包括 `ContextBudgetState`、工具结果预测性预算裁剪和相关 warning 语义
-  - `tests/engine/test_web_tools.py` 负责守住 web search provider 回退、web tools 的请求头、内容编码、自刷新壳页跟随、challenge 检测、storage state 解析与浏览器回退边界
+  - `tests/engine/test_web_tools.py` 负责守住 web search provider 回退（含 Tavily MCP 优先级与 Host 取消传播）、web tools 的请求头、内容编码、自刷新壳页跟随、challenge 检测、storage state 解析与浏览器回退边界
+  - `tests/engine/test_mcp_stdio_client.py` 与 `tests/engine/test_tavily_mcp_config.py` 共同守住 stdio MCP 握手、工具调用、取消、环境变量闸门和 `run.json -> WebToolsConfig` 配置传递边界
   - `tests/engine/test_web_playwright_backend.py` 负责守住 `dayu.engine.tools.web_playwright_backend` 的真源边界，包括浏览器单例、子进程 worker、资源路由与关闭/终止收口
 - `tests/fins/`
   - Fins direct operation、窄仓储、processor、tool service 测试
@@ -127,7 +128,7 @@ pip install -r requirements.txt
 - `tests/application/test_console_output.py` 负责守住 CLI / WeChat / render 入口的标准流容错边界：在非 UTF-8 终端里打印中文 help 或错误文案时不得因 `UnicodeEncodeError` 崩溃。
 - `tests/cli/test_init_command.py` 还要守住 `dayu-cli init` 的交互输入边界：测试不得隐式依赖开发机已有的 `SEC_USER_AGENT` 等环境变量短路交互流程，凡是验证完整 `run_init_command()` 路径的用例，都应显式 `delenv/setenv` 相关变量并提供完整输入序列；`--reset` 这类破坏性开关还必须验证二次确认语义，且直接回车默认按 `N` 取消。
 - `tests/cli/test_init_command.py` 还要守住已有 workspace 的增量补齐语义：未传 `--overwrite` 时，`init` 只能补齐缺失的 `config/prompts/**` 资产，不能覆盖用户本地已经改过的 manifest、scene 或其他配置文件。
-- `tests/cli/workspace_migrations/` 负责守住 `dayu-cli init` 启动期的一次性 schema 迁移：`run.json` lane 新 key 只能补缺省值，必须保留用户已有取值；Host SQLite 与 transcript 类迁移必须幂等、fail-fast，不能在请求期补救。
+- `tests/cli/workspace_migrations/` 负责守住 `dayu-cli init` 启动期的一次性 schema 迁移：`run.json` lane 与 Tavily MCP 新配置只能补缺省值，已知默认代理的错误工具名可定向修复，但必须保留其他用户取值；Host SQLite 与 transcript 类迁移必须幂等、fail-fast，不能在请求期补救。
 - `tests/services/test_fins_download_lane_gate.py` 负责守住 Service 装配出的 CN/HK PDF 下载段 gate：必须使用可轮询取消的 `try_acquire`，等待 permit 时要响应取消并按节流周期回收 dead-PID stale permit，不能把 Docling 转换包进下载 lane。
 - `tests/application/test_cancellation_bridge.py` 与 `tests/engine/test_async_openai_runner_utils.py` 这类并发/超时测试，不得把 0.08s、0.2s 这类固定 sleep 当成必然成立的完成信号；应使用带超时的轮询等待来守住语义，避免 CI runner 时序抖动造成伪失败。
 - `tests/fins/test_storage_batch_recovery.py` 这类跨进程锁测试同样不得把 5 秒级硬编码收口时间当成必然成立的环境保证；应使用具名超时常量和轮询等待，让较慢的 Windows runner 仍能验证同一套锁语义，而不是把时序抖动误报成存储回归。

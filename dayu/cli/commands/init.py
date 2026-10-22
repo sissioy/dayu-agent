@@ -3,7 +3,7 @@
 模块职责：
 - 复制包内配置到工作区
 - 交互式选择初始化模型方案 → 配置 API Key → 更新 manifest 默认模型
-- 可选配置联网检索 API Key
+- 可选配置联网检索凭据（含 Tavily MCP 代理 AUTH_KEY）
 - 跨平台环境变量持久化（macOS/Linux shell profile，Windows setx）
 """
 
@@ -23,14 +23,18 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 from dayu.cli.workspace_migrations import apply_all_workspace_migrations
-from dayu.startup.config_file_resolver import resolve_package_assets_path, resolve_package_config_path
-from dayu.state_dir_lock import StateDirSingleInstanceLock
+from dayu.cli.workspace_migrations.run_json_tavily_mcp import (
+    has_tavily_mcp_config,
+)
 from dayu.contracts.env_keys import (
     FMP_API_KEY_ENV,
     SEC_USER_AGENT_ENV,
     SERPER_API_KEY_ENV,
+    TAVILY_MCP_AUTH_KEY_ENV,
     TAVILY_API_KEY_ENV,
 )
+from dayu.startup.config_file_resolver import resolve_package_assets_path, resolve_package_config_path
+from dayu.state_dir_lock import StateDirSingleInstanceLock
 from dayu.workspace_paths import build_dayu_root_path
 
 MODULE = "CLI.INIT"
@@ -436,6 +440,13 @@ _OPTIONAL_SEARCH_KEYS: list[str] = [
     SERPER_API_KEY_ENV,
     FMP_API_KEY_ENV,
 ]
+
+_OPTIONAL_SEARCH_KEY_LABELS: dict[str, str] = {
+    TAVILY_MCP_AUTH_KEY_ENV: "AUTH_KEY（Tavily MCP 代理）",
+    TAVILY_API_KEY_ENV: TAVILY_API_KEY_ENV,
+    SERPER_API_KEY_ENV: SERPER_API_KEY_ENV,
+    FMP_API_KEY_ENV: FMP_API_KEY_ENV,
+}
 
 _HF_MIRROR_URL = "https://hf-mirror.com"
 
@@ -1542,10 +1553,18 @@ def _write_ollama_catalog_entries(
     catalog_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _prompt_optional_search_keys() -> list[tuple[str, str]]:
-    """交互式配置可选的联网检索 API Key。
+def _prompt_optional_search_keys(
+    *,
+    config_dir: Path | None = None,
+) -> list[tuple[str, str]]:
+    """交互式配置可选的联网检索凭据。
 
-    已在环境变量中存在的 key 自动跳过。
+    当前 ``run.json`` 已配置 Tavily MCP 时，将代理使用的 ``AUTH_KEY``
+    纳入交互入口；已在环境变量中存在的凭据自动跳过。
+
+    Args:
+        config_dir: 工作区配置目录。未提供或未启用 Tavily MCP 时，不询问
+            代理认证凭据。
 
     Returns:
         ``(key_name, key_value)`` 列表，仅包含用户实际输入了值的项。
@@ -1554,22 +1573,30 @@ def _prompt_optional_search_keys() -> list[tuple[str, str]]:
         无。
     """
 
-    missing_keys = [k for k in _OPTIONAL_SEARCH_KEYS if not os.environ.get(k)]
-    already_set = [k for k in _OPTIONAL_SEARCH_KEYS if os.environ.get(k)]
+    optional_keys = list(_OPTIONAL_SEARCH_KEYS)
+    if config_dir is not None and has_tavily_mcp_config(config_dir):
+        optional_keys.insert(0, TAVILY_MCP_AUTH_KEY_ENV)
+
+    missing_keys = [key for key in optional_keys if not os.environ.get(key)]
+    already_set = [key for key in optional_keys if os.environ.get(key)]
 
     if already_set:
-        print(f"\n联网检索 API Key（已配置: {', '.join(already_set)}）")
+        configured_labels = [
+            _OPTIONAL_SEARCH_KEY_LABELS[key]
+            for key in already_set
+        ]
+        print(f"\n联网检索凭据（已配置: {', '.join(configured_labels)}）")
 
     if not missing_keys:
-        print("  所有联网检索 API Key 均已配置，跳过。")
+        print("  所有联网检索凭据均已配置，跳过。")
         return []
 
-    print("是否配置以下联网检索 API Key？（可选，直接回车跳过）")
+    print("是否配置以下联网检索凭据？（可选，直接回车跳过）")
     results: list[tuple[str, str]] = []
 
     for key in missing_keys:
         try:
-            value = input(f"  {key}: ").strip()
+            value = input(f"  {_OPTIONAL_SEARCH_KEY_LABELS[key]}: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -1883,7 +1910,7 @@ def run_init_command(args: Namespace) -> int:
 
     # 4. 可选联网检索 Key
     auxiliary_env_persist_failed = False
-    search_keys = _prompt_optional_search_keys()
+    search_keys = _prompt_optional_search_keys(config_dir=config_dir)
     for key, value in search_keys:
         _search_target, search_ok = _persist_env_var(key, value)
         env_vars_written = True

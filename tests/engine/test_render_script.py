@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 def _load_render_module():
     """按文件路径加载 render.py 模块。"""
@@ -68,12 +70,21 @@ def test_main_pdf_branch_generates_html_then_pdf(tmp_path, monkeypatch):
     input_md.write_text("# note", encoding="utf-8")
     pdf_output = tmp_path / "final.pdf"
 
-    calls: dict[str, Path] = {}
+    calls: dict[str, Path | bool] = {}
 
-    def fake_generate_html(input_path: Path, html_path: Path, assets_dir: Path) -> None:
+    def fake_generate_html(
+        input_path: Path,
+        html_path: Path,
+        assets_dir: Path,
+        *,
+        two_column: bool = False,
+    ) -> None:
+        """记录 HTML 渲染参数。"""
+
         calls["input"] = input_path
         calls["html"] = html_path
         calls["assets"] = assets_dir
+        calls["two_column"] = two_column
 
     def fake_convert_html_to_pdf(html_path: Path, pdf_path: Path) -> None:
         calls["pdf_html"] = html_path
@@ -91,6 +102,122 @@ def test_main_pdf_branch_generates_html_then_pdf(tmp_path, monkeypatch):
     assert calls["html"] == pdf_output.resolve().with_suffix(".html")
     assert calls["pdf_html"] == calls["html"]
     assert calls["pdf"] == pdf_output.resolve()
+    assert calls["two_column"] is False
+
+
+def test_main_two_column_pdf_enables_two_column_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """双栏 PDF 应在中间 HTML 阶段启用专用样式。
+
+    Args:
+        tmp_path: pytest 临时目录 fixture。
+        monkeypatch: pytest 属性替换 fixture。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 双栏参数未传入 HTML 生成阶段时抛出。
+    """
+
+    render_mod = _load_render_module()
+    input_md = tmp_path / "report.md"
+    input_md.write_text("# report", encoding="utf-8")
+    pdf_output = tmp_path / "report.pdf"
+    calls: dict[str, bool] = {}
+
+    def fake_generate_html(
+        input_path: Path,
+        html_path: Path,
+        assets_dir: Path,
+        *,
+        two_column: bool = False,
+    ) -> None:
+        """记录是否启用双栏。
+
+        Args:
+            input_path: 输入 Markdown 路径。
+            html_path: 输出 HTML 路径。
+            assets_dir: 渲染资源目录。
+            two_column: 是否启用双栏。
+
+        Returns:
+            无。
+
+        Raises:
+            无。
+        """
+
+        _ = (input_path, html_path, assets_dir)
+        calls["two_column"] = two_column
+
+    monkeypatch.setattr(render_mod, "_generate_html", fake_generate_html)
+    monkeypatch.setattr(render_mod, "_convert_html_to_pdf", lambda html_path, pdf_path: None)
+    monkeypatch.setattr(render_mod, "_open_file", lambda path: None)
+    monkeypatch.setattr(
+        render_mod.sys,
+        "argv",
+        ["render.py", str(input_md), str(pdf_output), "--two-column"],
+    )
+
+    assert render_mod.main() == 0
+    assert calls["two_column"] is True
+
+
+def test_generate_html_two_column_adds_css(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """双栏 HTML 应把专用 CSS 交给 Pandoc。
+
+    Args:
+        tmp_path: pytest 临时目录 fixture。
+        monkeypatch: pytest 属性替换 fixture。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: Pandoc 参数未包含双栏样式时抛出。
+    """
+
+    render_mod = _load_render_module()
+    input_md = tmp_path / "report.md"
+    input_md.write_text("# report", encoding="utf-8")
+    output_html = tmp_path / "report.html"
+    assert render_mod.__file__ is not None
+    assets_dir = Path(render_mod.__file__).resolve().parent
+    calls: dict[str, list[str]] = {}
+
+    def fake_run_pandoc(args: list[str], *, cwd: Path) -> None:
+        """记录 Pandoc 参数。
+
+        Args:
+            args: Pandoc 命令参数。
+            cwd: Pandoc 工作目录。
+
+        Returns:
+            无。
+
+        Raises:
+            无。
+        """
+
+        _ = cwd
+        calls["args"] = args
+
+    monkeypatch.setattr(render_mod, "_run_pandoc", fake_run_pandoc)
+
+    render_mod._generate_html(
+        input_md,
+        output_html,
+        assets_dir,
+        two_column=True,
+    )
+
+    assert f"--css={assets_dir / 'two-column.css'}" in calls["args"]
 
 
 def test_main_usage_message_when_missing_argument(capsys, monkeypatch):

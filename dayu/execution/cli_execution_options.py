@@ -103,7 +103,7 @@ def add_execution_option_arguments(parser: argparse.ArgumentParser) -> None:
         "--web-provider",
         type=str,
         default=None,
-        choices=["auto", "tavily", "serper", "duckduckgo"],
+        choices=["auto", "tavily-mcp", "tavily", "serper", "duckduckgo"],
         help="联网检索 provider（默认读取 run.json.web_tools_config.provider，未配置时为 auto）",
     )
     parser.add_argument(

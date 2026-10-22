@@ -7,6 +7,9 @@
 SEC_USER_AGENT_ENV = "SEC_USER_AGENT"
 """SEC 下载请求使用的 User-Agent 环境变量名。"""
 
+TAVILY_MCP_AUTH_KEY_ENV = "AUTH_KEY"
+"""自建 Tavily MCP 代理使用的认证环境变量名。"""
+
 TAVILY_API_KEY_ENV = "TAVILY_API_KEY"
 """Tavily 联网检索 API Key 环境变量名。"""
 

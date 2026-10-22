@@ -2,7 +2,7 @@
 """将 Markdown 渲染为 HTML/PDF/Word。
 
 Usage:
-    python render.py <input_markdown> [output_docx]
+    python render.py <input_markdown> [output_path] [--two-column]
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ DEFAULT_CHROME_MAC_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google
 HTML_EXTENSIONS = {"html", "htm"}
 WORD_EXTENSIONS = {"docx", "doc"}
 MARKDOWN_INPUT_FORMAT = "gfm+hard_line_breaks"
+TWO_COLUMN_FLAG = "--two-column"
 
 
 def _print_help() -> None:
@@ -34,9 +35,10 @@ def _print_help() -> None:
     异常:
         无。
     """
-    print("Usage: dayu-render <input_markdown> [output_path]")
+    print("Usage: dayu-render <input_markdown> [output_path] [--two-column]")
     print()
     print("将 Markdown 渲染为 HTML / PDF / Word。")
+    print("--two-column  以双栏版式生成 HTML 或 PDF。")
 
 
 def _ensure_dir(path: Path) -> None:
@@ -133,13 +135,20 @@ def _build_pandoc_base_args(input_md: Path, assets_dir: Path, output_dir: Path) 
     ]
 
 
-def _generate_html(input_md: Path, target_html: Path, assets_dir: Path) -> None:
+def _generate_html(
+    input_md: Path,
+    target_html: Path,
+    assets_dir: Path,
+    *,
+    two_column: bool = False,
+) -> None:
     """生成 HTML 文件。
 
     参数:
         input_md: 输入 Markdown 文件路径。
         target_html: 目标 HTML 文件路径。
         assets_dir: 渲染资源目录。
+        two_column: 是否追加双栏 CSS。
 
     返回值:
         无。
@@ -161,8 +170,37 @@ def _generate_html(input_md: Path, target_html: Path, assets_dir: Path) -> None:
             str(target_html),
         ]
     )
+    if two_column:
+        args.insert(-2, f"--css={assets_dir / 'two-column.css'}")
 
     _run_pandoc(args, cwd=target_html.parent)
+
+
+def _parse_render_arguments(argv: list[str]) -> tuple[list[str], bool]:
+    """解析渲染器位置参数与双栏开关。
+
+    Args:
+        argv: 不含程序名的命令行参数。
+
+    Returns:
+        ``(位置参数, 是否双栏)``。
+
+    Raises:
+        ValueError: 出现未知选项或位置参数过多时抛出。
+    """
+
+    positionals: list[str] = []
+    two_column = False
+    for argument in argv:
+        if argument == TWO_COLUMN_FLAG:
+            two_column = True
+            continue
+        if argument.startswith("-"):
+            raise ValueError(f"未知选项: {argument}")
+        positionals.append(argument)
+    if len(positionals) > 2:
+        raise ValueError("位置参数过多")
+    return positionals, two_column
 
 
 def _generate_word(input_md: Path, target_path: Path, assets_dir: Path) -> None:
@@ -334,8 +372,15 @@ def main() -> int:
         _print_help()
         return 0
 
-    if len(sys.argv) < 2:
-        print("Usage: dayu-render <input_markdown> [output_path]", file=sys.stderr)
+    try:
+        positionals, two_column = _parse_render_arguments(sys.argv[1:])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        print("Usage: dayu-render <input_markdown> [output_path] [--two-column]", file=sys.stderr)
+        return 1
+
+    if not positionals:
+        print("Usage: dayu-render <input_markdown> [output_path] [--two-column]", file=sys.stderr)
         return 1
 
     assets_dir = Path(__file__).resolve().parent
@@ -343,14 +388,14 @@ def main() -> int:
     if not diagram_filter.is_file():
         raise SystemExit(f"diagram.lua not found: {diagram_filter}")
 
-    input_md_raw = Path(sys.argv[1])
+    input_md_raw = Path(positionals[0])
     input_md = input_md_raw.expanduser().resolve()
     if not input_md.is_file():
         print(f"Input markdown not found: {input_md}", file=sys.stderr)
         return 1
 
-    if len(sys.argv) >= 3:
-        output_path_raw = Path(sys.argv[2])
+    if len(positionals) >= 2:
+        output_path_raw = Path(positionals[1])
     else:
         output_path_raw = input_md.with_suffix(".docx")
 
@@ -361,15 +406,18 @@ def main() -> int:
     is_html = ext in HTML_EXTENSIONS
     is_pdf = ext == "pdf"
     is_word = ext in WORD_EXTENSIONS
+    if two_column and not (is_pdf or is_html):
+        print("--two-column 只支持 HTML 或 PDF 输出", file=sys.stderr)
+        return 1
 
     if is_pdf:
         html_target = output_path.with_suffix(".html")
         _ensure_dir(html_target.parent)
 
-        _generate_html(input_md, html_target, assets_dir)
+        _generate_html(input_md, html_target, assets_dir, two_column=two_column)
         _convert_html_to_pdf(html_target, output_path)
     elif is_html:
-        _generate_html(input_md, output_path, assets_dir)
+        _generate_html(input_md, output_path, assets_dir, two_column=two_column)
     elif is_word:
         _generate_word(input_md, output_path, assets_dir)
     else:

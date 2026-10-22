@@ -171,7 +171,7 @@ def test_collect_referenced_env_vars_ignores_non_config_and_binary_files(tmp_pat
 
     loader = module.ConfigLoader(ConfigFileResolver(workspace_config))
 
-    assert loader.collect_referenced_env_vars() == ("MODEL_API_KEY",)
+    assert loader.collect_referenced_env_vars() == ("AUTH_KEY", "MODEL_API_KEY")
 
 
 @pytest.mark.unit

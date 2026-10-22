@@ -152,7 +152,8 @@ class ToolExecutor(Protocol):
 - `SSEStreamParser` 实现了自适应 XML 标签提取逻辑：支持根据 `content_reasoning_tag` 参数在流式解析过程中实时拦截并分离特定的标签内容（如 Gemini 的 `<thought>`），将其转化为 `reasoning_delta` 事件，确保内容与推理过程在协议层即实现解耦。vendor 私有 reasoning 表达（如 `<thought>`）只在 Runner 边界内存在；跨过 Runner 后，`CONTENT_*` / `FINAL_ANSWER` / 下一轮 assistant message / Host 持久化 / 压缩链路统一只看到剥离后的正文，`AsyncAgent` 及以上层对 vendor 标签完全无感
 
 当前 web tools 的内部边界：
-- `search_web` 的 provider 选择、API 调用与结果组装真源已经下沉到 `dayu.engine.tools.web_search_providers`
+- `search_web` 的 provider 选择、API 调用与结果组装真源已经下沉到 `dayu.engine.tools.web_search_providers`；`auto` 当前按已就绪的 Tavily MCP、Tavily REST、Serper、DuckDuckGo 顺序回退
+- stdio MCP 的单次进程启动、initialize/initialized 握手、`tools/call` 与关闭真源在 `dayu.engine.mcp_stdio_client`；进程生命周期不跨越一次工具调用，timeout 与取消继续由 Host 注入的 `ToolExecutionContext` 强约束
 - `search_web` 的公开返回形状必须继续对齐 `SearchWebOutput` / `SearchResultRow` 这组稳定 TypedDict；`preferred_result` 只能是同结构单条结果或 `None`
 - requests Session/timeout 与内容编码/字符集解析真源已经下沉到 `dayu.engine.tools.web_http_session` 和 `dayu.engine.tools.web_http_encoding`
 - `fetch_web_page` 的 requests 主路径编排真源已经下沉到 `dayu.engine.tools.web_fetch_orchestrator`，集中承载 warmup、content-type probe、HTML/Docling 路由与浏览器升级判定

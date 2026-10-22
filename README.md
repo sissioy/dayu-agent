@@ -177,13 +177,12 @@ dayu-cli init
    - DeepSeek：Pro（默认）/ Flash 两档，共享 `DEEPSEEK_API_KEY`
    - Gemini：`gemini-2.5-flash`（默认）/ `gemini-2.5-pro` / `gemini-2.5-flash-lite` / `gemini-3.1-pro-preview` / `gemini-3.1-flash-lite-preview`
 3. 输入对应 API Key 并永久写入环境变量。
-4. 可选配置联网检索 API Key（TAVILY / SERPER / FMP）
+4. 可选配置联网检索凭据；默认自建 Tavily MCP 使用 `AUTH_KEY`，同时支持配置 `TAVILY_API_KEY`、`SERPER_API_KEY` 与 `FMP_API_KEY`。环境中已有的凭据会被识别并跳过输入。
 5. 自动检测 HuggingFace 官方 Hub 连通性：不可达时默认启用镜像加速，可达时默认跳过。可选配置 `HF_TOKEN` 提升下载稳定性。
 6. 自动配置 `transformers` / `huggingface_hub` / `tqdm` 输出降噪环境变量，避免下载进度打断终端状态栏。
 
 
 可选参数：
-
 ```bash
 dayu-cli init --base ./my_workspace    # 指定工作区目录（默认 ./workspace）
 dayu-cli init --reset                  # 删除 .dayu / config / assets 后重新初始化
@@ -191,6 +190,7 @@ dayu-cli init --overwrite              # 覆盖已有配置
 ```
 
 API Key 申请地址：
+- AUTH_KEY：由自建 Tavily MCP 代理分配
 - MIMO_PLAN_API_KEY / MIMO_PLAN_SG_API_KEY / MIMO_API_KEY：https://platform.xiaomimimo.com/#/console/api-keys
 - DEEPSEEK_API_KEY：https://platform.deepseek.com/api_keys
 - FMP_API_KEY：https://site.financialmodelingprep.com/developer/docs/dashboard
@@ -204,7 +204,7 @@ API Key 申请地址：
 - 本地 Ollama 模型和自定义 OpenAI 兼容 API 在 `init` 时会根据最大上下文 tokens 自动配置 `conversation_memory`（>= 100 万 tokens 扩大工作记忆上限，< 100 万收紧情景记忆预算）；Ollama 的 `write_chapter` 并发 lane 默认设为 2。
 - `--reset` 确认后会删除 `workspace/.dayu/`、`workspace/config/`、`workspace/assets/`，再按首次初始化流程重建；它比 `--overwrite` 更彻底，会一并清空运行时状态。
 - 升级 dayu 后若运行命令时看到 `HostStore 检测到旧版 SQLite schema 与当前实现不兼容` 报错，按提示处理：优先删除报错信息里 `db_path` 指向的数据库文件后重启（仅丢失 host 运行状态，保留 conversation 历史与 `run.json`）；如果不方便定位也可以直接跑 `dayu-cli init --reset` 完整重建工作区。
-- 联网搜索默认可走 `auto`，若配置了 Tavily / Serper，会优先使用对应 provider。
+- 默认 `run.json` 已配置 `tavily-proxy` 的 stdio MCP 启动方式，但不保存密钥。`dayu-cli init` 会检测并可持久化 `AUTH_KEY`；也可以提前在当前 shell 执行 `export AUTH_KEY='你的真实值'`。`auto` 会依次尝试已配置的 Tavily MCP、Tavily REST、Serper 和 DuckDuckGo；未设置 `AUTH_KEY` 时跳过 Tavily MCP。
 - 若运行环境需要访问 `localhost`、私网 IP 或内网域名，可在 `workspace/config/run.json` 的 `web_tools_config.allow_private_network_url` 中显式打开内网访问开关。
 - 修改默认模型请参考 [8. 模型配置](#model-config)。
 
@@ -296,7 +296,7 @@ dayu-cli <subcommand> [参数]
 | `--temperature` | `prompt` `interactive` `write` | 覆盖模型 temperature |
 | `--label` | `prompt` `interactive` | 把当前对话绑定到可恢复 label；`prompt` 会进入 labeled multi-turn，对应 scene 为 `prompt_mt` |
 | `--new-session` | `interactive` | 不续接上一次 interactive 多轮会话，改为从头开始一个新会话 |
-| `--web-provider` | `prompt` `interactive` `write` | 指定联网检索 provider，如 `auto`、`tavily`、`serper`、`duckduckgo` |
+| `--web-provider` | `prompt` `interactive` `write` | 指定联网检索 provider，如 `auto`、`tavily-mcp`、`tavily`、`serper`、`duckduckgo` |
 | `--enable-tool-trace` | `prompt` `interactive` `write` | 开启工具调用追踪，覆盖 `run.json` 中的 trace 配置 |
 | `--tool-trace-dir` | `prompt` `interactive` `write` | 指定 trace 输出目录，覆盖 `run.json` 中的 trace 配置 |
 | `--thinking` / `--no-thinking` | `prompt` `interactive` | 控制是否在终端回显模型思考过程 |
@@ -709,6 +709,27 @@ dayu-cli write --ticker AAPL \
   --template ./workspace/assets/定性分析模板.md \
   --output ./workspace/draft/AAPL \
   --enable-tool-trace
+```
+
+使用自建 Tavily MCP 批量写港股研报（阿里健康 `0241`、平安健康 `1833`、京东健康 `6618`、中广核矿业 `1164`、腾讯 `0700`、阿里巴巴 `9988`、美团 `3690`）：
+
+```bash
+export AUTH_KEY='你的真实值'
+
+for ticker in 0241 1833 6618 1164 0700 9988 3690; do
+  dayu-cli write \
+    --ticker "$ticker" \
+    --web-provider tavily-mcp \
+    --enable-tool-trace
+done
+```
+
+如果这些公司的财报尚未进入 `workspace/portfolio/`，先运行：
+
+```bash
+for ticker in 0241 1833 6618 1164 0700 9988 3690; do
+  dayu-cli download --ticker "$ticker"
+done
 ```
 
 命令说明：
@@ -1126,7 +1147,7 @@ https://www.reuters.com/markets/companies/AAPL.OQ/
 Markdown 报告渲染入口：
 
 ```bash
-dayu-render <输入文件.md> [输出文件]
+dayu-render <输入文件.md> [输出文件] [--two-column]
 ```
 
 常见示例：
@@ -1135,6 +1156,7 @@ dayu-render <输入文件.md> [输出文件]
 dayu-render workspace/draft/AAPL/AAPL_qual_report.md
 dayu-render workspace/draft/AAPL/AAPL_qual_report.md report.pdf
 dayu-render workspace/draft/AAPL/AAPL_qual_report.md report.html
+dayu-render workspace/draft/AAPL/AAPL_qual_report.md report.pdf --two-column
 ```
 
 支持格式：
@@ -1144,6 +1166,15 @@ dayu-render workspace/draft/AAPL/AAPL_qual_report.md report.html
 
 说明：
 - 生成 **HTML**、**Word（.docx）** 需要 `pandoc`；生成 **PDF** 需要 `pandoc`（先由 Pandoc 生成 HTML）以及 Chrome（Headless 打印为 PDF）
+- `--two-column` 为 HTML/PDF 启用 A4 双栏研报样式；默认单栏行为不变。批量渲染上述七家公司可执行：
+
+```bash
+for ticker in 0241 1833 6618 1164 0700 9988 3690; do
+  input="workspace/draft/$ticker/${ticker}_qual_report.md"
+  dayu-render "$input" "${input%.md}.pdf" --two-column
+done
+```
+
 - 若 Chrome 不在标准位置，可设置 `PUPPETEER_EXECUTABLE_PATH`
 - 渲染器会保留 Markdown 里的普通换行；例如列表项里单独一行的“标签”与下一行正文，在 `.docx` 中会继续换行显示
 

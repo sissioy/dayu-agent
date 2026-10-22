@@ -20,7 +20,12 @@ def test_apply_all_migrates_both_artifacts(tmp_path: Path, capsys: pytest.Captur
     config_dir = base_dir / "config"
     config_dir.mkdir()
     (config_dir / "run.json").write_text(
-        json.dumps({"host_config": {"lane": {"llm_api": 8}}}),
+        json.dumps(
+            {
+                "web_tools_config": {"provider": "auto"},
+                "host_config": {"lane": {"llm_api": 8}},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -59,6 +64,7 @@ def test_apply_all_migrates_both_artifacts(tmp_path: Path, capsys: pytest.Captur
     assert payload["host_config"]["lane"]["write_chapter"] == 5
     assert payload["host_config"]["lane"]["cn_download"] == 1
     assert payload["host_config"]["lane"]["hk_download"] == 1
+    assert payload["web_tools_config"]["tavily_mcp"]["tool_name"] == "tavily-search"
 
     # db
     conn = sqlite3.connect(str(db_path))
@@ -76,6 +82,7 @@ def test_apply_all_migrates_both_artifacts(tmp_path: Path, capsys: pytest.Captur
     captured = capsys.readouterr()
     assert "run.json" in captured.out
     assert "cn_download" in captured.out
+    assert "Tavily MCP" in captured.out
     assert "business_concurrency_lane" in captured.out
     assert "max_output_tokens" in captured.out
 
@@ -99,7 +106,18 @@ def test_apply_all_is_silent_when_nothing_to_do(
                         "cn_download": 1,
                         "hk_download": 1,
                     }
-                }
+                },
+                "web_tools_config": {
+                    "provider": "auto",
+                    "tavily_mcp": {
+                        "command": "npx",
+                        "args": [
+                            "mcp-remote",
+                            "https://tavily-proxy.sissioy.workers.dev/mcp",
+                        ],
+                        "tool_name": "tavily-search",
+                    },
+                },
             }
         ),
         encoding="utf-8",

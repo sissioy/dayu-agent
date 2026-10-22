@@ -9,7 +9,7 @@ from queue import Empty
 import socket
 import sys
 from types import ModuleType, SimpleNamespace
-from typing import Any, Optional, cast
+from typing import Any, Optional, TYPE_CHECKING, Unpack, cast
 
 import pytest
 import requests
@@ -17,6 +17,8 @@ from urllib3.exceptions import MaxRetryError, ReadTimeoutError as Urllib3ReadTim
 
 from dayu.contracts.protocols import ToolExecutionContext
 from dayu.contracts.cancellation import CancelledError, CancellationToken
+from dayu.contracts.tool_configs import McpStdioServerConfig
+from dayu.engine.mcp_stdio_client import McpJsonObject
 from dayu.engine.processors.html_pipeline import HtmlPipelineStageError
 from dayu.engine.tool_errors import ToolBusinessError
 from dayu.engine.tool_registry import ToolRegistry
@@ -28,6 +30,7 @@ from dayu.engine.tools.web_search_providers import (
     _search_with_duckduckgo,
     _search_with_serper,
     _search_with_tavily,
+    _search_with_tavily_mcp,
 )
 from dayu.engine.tools.web_tools import (
     _DEFAULT_BROWSER_USER_AGENT,
@@ -48,6 +51,9 @@ from dayu.engine.tools.web_tools import (
     _warmup_domain,
     register_web_tools,
 )
+
+if TYPE_CHECKING:
+    from requests import _types as requests_types
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +151,7 @@ class _FakeHttpResponse:
 
         if self._http_error is not None:
             if getattr(self._http_error, "response", None) is None:
-                self._http_error.response = self
+                self._http_error.response = cast(requests.Response, self)
             raise self._http_error
 
     def json(self) -> dict[str, Any]:
@@ -203,7 +209,12 @@ class _FakeSession(requests.Session):
         self._get_handler = get_handler
         self._head_handler = head_handler
 
-    def get(self, url: str | bytes, **kwargs: Any) -> Any:
+    def get(
+        self,
+        url: "requests_types.UriType",
+        params: "requests_types.ParamsType" = None,
+        **kwargs: Unpack["requests_types.GetKwargs"],
+    ) -> requests.Response:
         """模拟 GET 请求。
 
         Args:
@@ -218,11 +229,16 @@ class _FakeSession(requests.Session):
         """
 
         normalized_url = url.decode("utf-8") if isinstance(url, bytes) else url
+        _ = params
         if self._get_handler is None:
-            return _FakeHttpResponse(url=normalized_url)
-        return self._get_handler(normalized_url, **kwargs)
+            return cast(requests.Response, _FakeHttpResponse(url=normalized_url))
+        return cast(requests.Response, self._get_handler(normalized_url, **kwargs))
 
-    def head(self, url: str | bytes, **kwargs: Any) -> Any:
+    def head(
+        self,
+        url: "requests_types.UriType",
+        **kwargs: Unpack["requests_types.RequestKwargs"],
+    ) -> requests.Response:
         """模拟 HEAD 请求。
 
         Args:
@@ -238,8 +254,8 @@ class _FakeSession(requests.Session):
 
         normalized_url = url.decode("utf-8") if isinstance(url, bytes) else url
         if self._head_handler is None:
-            return _FakeHttpResponse(url=normalized_url)
-        return self._head_handler(normalized_url, **kwargs)
+            return cast(requests.Response, _FakeHttpResponse(url=normalized_url))
+        return cast(requests.Response, self._head_handler(normalized_url, **kwargs))
 
 
 class _FakeDocument:
@@ -359,6 +375,7 @@ def test_resolve_provider_and_candidates(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("SERPER_API_KEY", "serper-demo")
 
     assert _resolve_provider(preferred="auto") == "auto"
+    assert _resolve_provider(preferred="tavily-mcp") == "tavily_mcp"
     assert _candidate_providers("auto") == ["tavily", "serper", "duckduckgo"]
     assert _candidate_providers("tavily") == ["tavily", "duckduckgo"]
 
@@ -392,6 +409,37 @@ def test_candidate_providers_auto_skips_unconfigured_api_key_providers(
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.setenv("SERPER_API_KEY", "serper-demo")
     assert _candidate_providers("auto") == ["serper", "duckduckgo"]
+
+
+@pytest.mark.unit
+def test_candidate_providers_auto_prefers_configured_tavily_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证 auto 模式优先选择已配置的 Tavily MCP。
+
+    Args:
+        monkeypatch: pytest monkeypatch fixture。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 断言失败时抛出。
+    """
+
+    monkeypatch.setenv("AUTH_KEY", "configured-in-test")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    config = McpStdioServerConfig(
+        command="npx",
+        args=("mcp-remote", "https://example.com/mcp"),
+        env={"AUTH_KEY": "{{AUTH_KEY}}"},
+    )
+
+    assert _candidate_providers("auto", tavily_mcp_config=config) == [
+        "tavily_mcp",
+        "duckduckgo",
+    ]
 
 
 @pytest.mark.unit
@@ -757,6 +805,82 @@ def test_search_web_falls_back_to_next_provider(monkeypatch: pytest.MonkeyPatch)
     assert output["next_action_args"] == {"url": "https://www.sec.gov/Archives/edgar/data/1"}
     assert "fetch_web_page" in output["hint"]
     assert output["results"][0]["url"].startswith("https://www.sec.gov")
+
+
+@pytest.mark.unit
+def test_search_web_does_not_swallow_host_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证 MCP provider 不会把 Host 取消误判为可回退失败。
+
+    Args:
+        monkeypatch: pytest monkeypatch fixture。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 取消异常未原样传播时抛出。
+    """
+
+    registry = ToolRegistry()
+    _, search_web, _ = _create_search_web_tool(
+        registry,
+        provider="tavily-mcp",
+        request_timeout_seconds=12.0,
+        max_search_results=20,
+        tavily_mcp_config=McpStdioServerConfig(
+            command="npx",
+            args=("mcp-remote", "https://example.com/mcp"),
+        ),
+    )
+    duckduckgo_called = False
+
+    def _raise_cancelled(**_kwargs: Any) -> list[dict[str, str]]:
+        """模拟 MCP 调用观察到 Host 取消。
+
+        Args:
+            **_kwargs: 未使用的 provider 调用参数。
+
+        Returns:
+            不返回。
+
+        Raises:
+            CancelledError: 始终抛出以模拟取消。
+        """
+
+        raise CancelledError("操作已被取消")
+
+    def _record_duckduckgo(**_kwargs: Any) -> list[dict[str, str]]:
+        """记录是否错误进入 DuckDuckGo 回退。
+
+        Args:
+            **_kwargs: 未使用的 provider 调用参数。
+
+        Returns:
+            空检索结果。
+
+        Raises:
+            无。
+        """
+
+        nonlocal duckduckgo_called
+        duckduckgo_called = True
+        return []
+
+    monkeypatch.setattr(
+        "dayu.engine.tools.web_search_providers._search_with_tavily_mcp",
+        _raise_cancelled,
+    )
+    monkeypatch.setattr(
+        "dayu.engine.tools.web_search_providers._search_with_duckduckgo",
+        _record_duckduckgo,
+    )
+
+    with pytest.raises(CancelledError):
+        search_web(query="腾讯 财报")
+
+    assert duckduckgo_called is False
 
 
 @pytest.mark.unit
@@ -1385,6 +1509,88 @@ def test_search_with_tavily_maps_payload_and_rows(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.unit
+def test_search_with_tavily_mcp_maps_tool_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证 Tavily MCP 搜索参数和返回结果映射。
+
+    Args:
+        monkeypatch: pytest monkeypatch fixture。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 断言失败时抛出。
+    """
+
+    captured: dict[str, McpJsonObject] = {}
+    config = McpStdioServerConfig(
+        command="npx",
+        args=("mcp-remote", "https://example.com/mcp"),
+        tool_name="tavily_search",
+    )
+
+    def _fake_call_mcp_tool(
+        *,
+        config: McpStdioServerConfig,
+        arguments: McpJsonObject,
+        timeout_seconds: float,
+        cancellation_token: CancellationToken | None = None,
+    ) -> McpJsonObject:
+        """返回测试用 Tavily MCP 响应。
+
+        Args:
+            config: MCP 服务配置。
+            arguments: 工具调用参数。
+            timeout_seconds: 调用超时秒数。
+            cancellation_token: Host 传入的取消令牌。
+
+        Returns:
+            模拟的 Tavily MCP 工具结果。
+
+        Raises:
+            无。
+        """
+
+        _ = (config, timeout_seconds, cancellation_token)
+        captured["arguments"] = arguments
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": '{"results":[{"title":"公告","url":"https://example.com/report","content":"摘要","published_date":"2026-09-01"}]}',
+                }
+            ],
+            "isError": False,
+        }
+
+    monkeypatch.setattr(
+        "dayu.engine.tools.web_search_providers.call_mcp_tool",
+        _fake_call_mcp_tool,
+    )
+
+    rows = _search_with_tavily_mcp(
+        query="腾讯 财报",
+        domains=["hkexnews.hk"],
+        recency_days=30,
+        max_results=3,
+        config=config,
+        timeout_seconds=8.0,
+    )
+
+    assert captured["arguments"]["max_results"] == 5
+    assert captured["arguments"]["include_domains"] == ["hkexnews.hk"]
+    assert isinstance(captured["arguments"]["start_date"], str)
+    assert rows == [
+        {
+            "title": "公告",
+            "url": "https://example.com/report",
+            "snippet": "摘要",
+            "published_date": "2026-09-01",
+        }
+    ]
+
+
+@pytest.mark.unit
 def test_search_with_serper_requires_api_key() -> None:
     """验证 Serper 缺失 API key 时抛错。
 
@@ -1715,7 +1921,7 @@ def test_fetch_and_convert_content_sec_403_reraises_http_error(
     """
 
     http_error = requests.HTTPError("403")
-    http_error.response = SimpleNamespace(status_code=403)
+    http_error.response = cast(requests.Response, SimpleNamespace(status_code=403))
 
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
@@ -1746,7 +1952,7 @@ def test_fetch_and_convert_content_non_403_http_error_reraises(
     """
 
     http_error = requests.HTTPError("500")
-    http_error.response = SimpleNamespace(status_code=500)
+    http_error.response = cast(requests.Response, SimpleNamespace(status_code=500))
 
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
@@ -2207,26 +2413,34 @@ def test_fetch_and_convert_content_recomputes_timeout_for_each_meta_refresh_hop(
 
             super().__init__()
 
-        def get(self, url: str | bytes, **kwargs: Any) -> Any:
+        def get(
+            self,
+            url: "requests_types.UriType",
+            params: "requests_types.ParamsType" = None,
+            **kwargs: Unpack["requests_types.GetKwargs"],
+        ) -> requests.Response:
             """返回带 meta refresh 的响应，并记录 timeout。"""
 
-            requested_timeouts.append(float(kwargs["timeout"]))
+            _ = params
+            timeout_value = kwargs.get("timeout")
+            assert isinstance(timeout_value, int | float)
+            requested_timeouts.append(float(timeout_value))
             normalized_url = url.decode("utf-8") if isinstance(url, bytes) else url
             if normalized_url.endswith("/start"):
-                return _FakeHttpResponse(
+                return cast(requests.Response, _FakeHttpResponse(
                     content=shell_html.encode("utf-8"),
                     text=shell_html,
                     status_code=200,
                     headers={"Content-Type": "text/html; charset=utf-8"},
                     url="https://example.com/start",
-                )
-            return _FakeHttpResponse(
+                ))
+            return cast(requests.Response, _FakeHttpResponse(
                 content=article_html.encode("utf-8"),
                 text=article_html,
                 status_code=200,
                 headers={"Content-Type": "text/html; charset=utf-8"},
                 url="https://example.com/next",
-            )
+            ))
 
     monotonic_values = iter([100.0, 101.6])
     monkeypatch.setattr(
@@ -2641,12 +2855,12 @@ def test_fetch_web_page_returns_structured_failure_on_http_403(monkeypatch: pyte
         fetch_truncate_chars=80000,
     )
     http_error = requests.HTTPError("403")
-    http_error.response = _FakeHttpResponse(
+    http_error.response = cast(requests.Response, _FakeHttpResponse(
         status_code=403,
         headers={"Content-Type": "text/html", "cf-ray": "abc"},
         url="https://example.com/protected",
         text="forbidden",
-    )
+    ))
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
         head_handler=lambda _url, **_kwargs: _FakeHttpResponse(status_code=403, headers={"Content-Type": "text/html"}),
@@ -2680,12 +2894,12 @@ def test_fetch_web_page_calls_playwright_placeholder_on_http_403(monkeypatch: py
         fetch_truncate_chars=80000,
     )
     http_error = requests.HTTPError("403")
-    http_error.response = _FakeHttpResponse(
+    http_error.response = cast(requests.Response, _FakeHttpResponse(
         status_code=403,
         headers={"Content-Type": "text/html"},
         url="https://example.com/protected",
         text="forbidden",
-    )
+    ))
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
         head_handler=lambda _url, **_kwargs: _FakeHttpResponse(status_code=403, headers={"Content-Type": "text/html"}),
@@ -3404,7 +3618,7 @@ def test_fetch_web_page_treats_datadome_401_as_blocked(monkeypatch: pytest.Monke
         fetch_truncate_chars=80000,
     )
     http_error = requests.HTTPError("401")
-    http_error.response = _FakeHttpResponse(
+    http_error.response = cast(requests.Response, _FakeHttpResponse(
         status_code=401,
         headers={
             "Content-Type": "text/html; charset=utf-8",
@@ -3414,7 +3628,7 @@ def test_fetch_web_page_treats_datadome_401_as_blocked(monkeypatch: pytest.Monke
         },
         url="https://www.reuters.com/article",
         text="<html><body>Please enable JS and disable any ad blocker</body></html>",
-    )
+    ))
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
         head_handler=lambda _url, **_kwargs: _FakeHttpResponse(status_code=401, headers={"Content-Type": "text/html"}),
@@ -3454,12 +3668,12 @@ def test_playwright_fallback_success_on_403(monkeypatch: pytest.MonkeyPatch) -> 
         fetch_truncate_chars=80000,
     )
     http_error = requests.HTTPError("403")
-    http_error.response = _FakeHttpResponse(
+    http_error.response = cast(requests.Response, _FakeHttpResponse(
         status_code=403,
         headers={"Content-Type": "text/html"},
         url="https://example.com/protected",
         text="forbidden",
-    )
+    ))
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
         head_handler=lambda _url, **_kwargs: _FakeHttpResponse(status_code=403, headers={"Content-Type": "text/html"}),
@@ -3494,12 +3708,12 @@ def test_fetch_web_page_escalates_http_412_to_browser(monkeypatch: pytest.Monkey
         fetch_truncate_chars=80000,
     )
     http_error = requests.HTTPError("412")
-    http_error.response = _FakeHttpResponse(
+    http_error.response = cast(requests.Response, _FakeHttpResponse(
         status_code=412,
         headers={"Content-Type": "text/html", "server": "nginx"},
         url="https://example.com/protected",
         text="precondition failed",
-    )
+    ))
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
         head_handler=lambda _url, **_kwargs: _FakeHttpResponse(status_code=412, headers={"Content-Type": "text/html"}),
@@ -3533,12 +3747,12 @@ def test_fetch_web_page_does_not_escalate_plain_401_to_browser(monkeypatch: pyte
         fetch_truncate_chars=80000,
     )
     http_error = requests.HTTPError("401")
-    http_error.response = _FakeHttpResponse(
+    http_error.response = cast(requests.Response, _FakeHttpResponse(
         status_code=401,
         headers={"Content-Type": "text/html"},
         url="https://example.com/protected",
         text="unauthorized",
-    )
+    ))
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
         head_handler=lambda _url, **_kwargs: _FakeHttpResponse(status_code=401, headers={"Content-Type": "text/html"}),
@@ -4430,12 +4644,12 @@ def test_fetch_web_page_failure_fields_use_stable_enums(monkeypatch: pytest.Monk
         fetch_truncate_chars=80000,
     )
     http_error = requests.HTTPError("500")
-    http_error.response = _FakeHttpResponse(
+    http_error.response = cast(requests.Response, _FakeHttpResponse(
         status_code=500,
         headers={"Content-Type": "text/html"},
         url="https://example.com/error",
         text="server error",
-    )
+    ))
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
         head_handler=lambda _url, **_kwargs: _FakeHttpResponse(status_code=500, headers={"Content-Type": "text/html"}),
@@ -4483,12 +4697,12 @@ def test_fetch_web_page_retry_after_seconds_from_response_header(monkeypatch: py
         fetch_truncate_chars=80000,
     )
     http_error = requests.HTTPError("429")
-    http_error.response = _FakeHttpResponse(
+    http_error.response = cast(requests.Response, _FakeHttpResponse(
         status_code=429,
         headers={"Content-Type": "text/html", "Retry-After": "15"},
         url="https://example.com/rate-limit",
         text="rate limited",
-    )
+    ))
     fake_session = _FakeSession(
         get_handler=lambda _url, **_kwargs: _FakeHttpResponse(http_error=http_error),
         head_handler=lambda _url, **_kwargs: _FakeHttpResponse(status_code=429, headers={"Content-Type": "text/html"}),

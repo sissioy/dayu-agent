@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dayu.contracts.toolset_config import (
     ToolsetConfigSnapshot,
+    ToolsetConfigValue,
     coerce_toolset_config_float,
     coerce_toolset_config_int,
     find_toolset_config,
@@ -79,6 +80,29 @@ class FinsToolLimits:
 
 
 @dataclass(frozen=True)
+class McpStdioServerConfig:
+    """stdio MCP 服务启动配置。
+
+    Args:
+        command: MCP stdio 进程命令。
+        args: 传给进程的参数。
+        env: 追加到子进程的环境变量；值支持 ``{{ENV_NAME}}`` 占位符。
+        tool_name: 需要调用的远端 MCP 工具名。
+
+    Returns:
+        无。
+
+    Raises:
+        无。
+    """
+
+    command: str
+    args: tuple[str, ...]
+    env: dict[str, str] = field(default_factory=dict)
+    tool_name: str = "tavily_search"
+
+
+@dataclass(frozen=True)
 class WebToolsConfig:
     """联网工具配置。
 
@@ -90,6 +114,7 @@ class WebToolsConfig:
         allow_private_network_url: 是否允许访问内网/本地网络 URL。
         playwright_channel: 浏览器回退使用的 Chromium channel。
         playwright_storage_state_dir: Playwright storage state 目录。
+        tavily_mcp: 可选 Tavily stdio MCP 服务配置。
 
     Returns:
         无。
@@ -105,6 +130,53 @@ class WebToolsConfig:
     allow_private_network_url: bool = False
     playwright_channel: str = "chrome"
     playwright_storage_state_dir: str = "output/web_diagnostics/storage_states"
+    tavily_mcp: McpStdioServerConfig | None = None
+
+
+def build_mcp_stdio_server_config(
+    value: ToolsetConfigValue,
+    *,
+    field_name: str,
+) -> McpStdioServerConfig | None:
+    """从通用配置值恢复 stdio MCP 服务配置。
+
+    Args:
+        value: 原始 MCP 配置值。
+        field_name: 配置字段名，用于错误提示。
+
+    Returns:
+        恢复后的 MCP 配置；输入为 ``None`` 时返回 ``None``。
+
+    Raises:
+        TypeError: 当配置结构或字段类型非法时抛出。
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise TypeError(f"{field_name} 必须是对象")
+
+    raw_command = value.get("command")
+    raw_args = value.get("args")
+    raw_env = value.get("env", {})
+    raw_tool_name = value.get("tool_name", "tavily_search")
+    if not isinstance(raw_command, str) or not raw_command.strip():
+        raise TypeError(f"{field_name}.command 必须是非空字符串")
+    if not isinstance(raw_args, list) or any(not isinstance(item, str) for item in raw_args):
+        raise TypeError(f"{field_name}.args 必须是字符串数组")
+    if not isinstance(raw_env, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in raw_env.items()
+    ):
+        raise TypeError(f"{field_name}.env 必须是字符串到字符串的映射")
+    if not isinstance(raw_tool_name, str) or not raw_tool_name.strip():
+        raise TypeError(f"{field_name}.tool_name 必须是非空字符串")
+    return McpStdioServerConfig(
+        command=raw_command.strip(),
+        args=tuple(str(item) for item in raw_args),
+        env={str(key): str(item) for key, item in raw_env.items()},
+        tool_name=raw_tool_name.strip(),
+    )
 
 
 def build_doc_tool_limits(snapshot: ToolsetConfigSnapshot | None) -> DocToolLimits:
@@ -259,6 +331,10 @@ def build_web_tools_config(snapshot: ToolsetConfigSnapshot | None) -> WebToolsCo
         playwright_storage_state_dir=str(
             payload.get("playwright_storage_state_dir", defaults.playwright_storage_state_dir)
         ),
+        tavily_mcp=build_mcp_stdio_server_config(
+            payload.get("tavily_mcp"),
+            field_name="web.tavily_mcp",
+        ),
     )
 
 
@@ -361,10 +437,12 @@ def build_legacy_toolset_configs(
 __all__ = [
     "DocToolLimits",
     "FinsToolLimits",
+    "McpStdioServerConfig",
     "WebToolsConfig",
     "build_doc_tool_limits",
     "build_fins_tool_limits",
     "build_legacy_toolset_configs",
+    "build_mcp_stdio_server_config",
     "build_web_tools_config",
     "resolve_doc_tool_limits_from_toolset_configs",
     "resolve_fins_tool_limits_from_toolset_configs",

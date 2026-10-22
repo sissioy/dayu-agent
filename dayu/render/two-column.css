@@ -1,0 +1,50 @@
+/* 研报双栏版式：由 dayu-render --two-column 显式启用。 */
+@page {
+  size: A4;
+  margin: 12mm;
+}
+
+.page {
+  max-width: none;
+  padding: 0;
+  column-count: 2;
+  column-gap: 9mm;
+  column-rule: 0.4px solid #d8dee4;
+}
+
+.page > .print-header,
+.page h1 {
+  column-span: all;
+}
+
+.page h1,
+.page h2,
+.page h3,
+.page h4,
+.page h5,
+.page h6 {
+  break-after: avoid-column;
+}
+
+.page table,
+.page figure,
+.page img,
+.page pre,
+.page blockquote,
+.page li {
+  break-inside: avoid-column;
+}
+
+.page table {
+  font-size: 0.82em;
+}
+
+@media print {
+  body {
+    background: #fff !important;
+  }
+
+  .page {
+    min-height: 0;
+  }
+}

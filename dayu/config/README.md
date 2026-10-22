@@ -475,10 +475,34 @@ Agent 行为控制：
 - `allow_private_network_url`
 - `playwright_channel`
 - `playwright_storage_state_dir`
+- `tavily_mcp`
 
 说明：
 - `run.json` 不决定 web 工具是否进入候选集合；候选资格由 scene manifest 的 `tool_selection` 决定，最终还要命中已安装的 registrar。
 - `web_tools_config` 只负责传递联网执行参数，例如 provider、超时、结果上限与 URL 安全策略。
+- `provider` 支持 `auto`、`tavily-mcp`、`tavily`、`serper`、`duckduckgo`。默认 `auto` 会优先选择环境已就绪的 Tavily MCP；若 `AUTH_KEY` 未设置，则跳过 MCP 并继续原有 provider 回退链。
+- `tavily_mcp` 是 stdio MCP 进程配置。默认通过 `npx -y mcp-remote` 连接自建代理，密钥只从当前进程环境解析，不应写入 JSON：
+
+```json
+{
+  "tavily_mcp": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-remote",
+      "https://tavily-proxy.sissioy.workers.dev/mcp",
+      "--header",
+      "x-api-key:${AUTH_KEY}"
+    ],
+    "env": {
+      "AUTH_KEY": "{{AUTH_KEY}}"
+    },
+    "tool_name": "tavily-search"
+  }
+}
+```
+
+  `dayu-cli init` 会检测并可持久化 `AUTH_KEY`；也可以在运行前手动执行 `export AUTH_KEY='你的真实值'`。`env` 中的 `{{AUTH_KEY}}` 由 Dayu 从宿主环境解析，`args` 中的 `${AUTH_KEY}` 留给 `mcp-remote` 展开。
 - 默认只允许访问公开互联网 URL。
 - 当你处在代理、内网文档站点、开发机本地服务等场景，确实需要访问 `localhost`、私网 IP、私网 DNS 解析目标时，可把 `allow_private_network_url` 设为 `true`。
 - 这个开关不会放开 `file://` 等非 HTTP/HTTPS scheme；它只放开内网/本地网络目标。

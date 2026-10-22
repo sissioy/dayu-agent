@@ -355,7 +355,7 @@ UI / Service 的**消费者视角使用指南**（调用序、稳定接口、必
 
 它负责：
 
-- 向后扫描 `workspace/config/run.json`，在缺少新 schema 要求的 key 时补齐默认值，已有取值一律保留
+- 向后扫描 `workspace/config/run.json`，在缺少新 schema 要求的 key 时补齐默认值；当前包括 Host lane 与 Tavily MCP 代理配置，已有自定义取值一律保留
 - 向后扫描 `.dayu/host/dayu_host.db` 中的 `pending_conversation_turns.resume_source_json`，按当前 schema 原地改名旧 JSON key
 - 每条规则一个模块、一个幂等函数，通过 `apply_all_workspace_migrations` 统一调度
 - 只在规则实际生效时打印一行，供用户感知

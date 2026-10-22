@@ -93,6 +93,7 @@ def register_web_toolset(context: ToolsetRegistrationContext) -> int:
         allow_private_network_url=bool(context.execution_permissions.web.allow_private_network_url),
         playwright_channel=web_tools_config.playwright_channel,
         playwright_storage_state_dir=web_tools_config.playwright_storage_state_dir,
+        tavily_mcp_config=web_tools_config.tavily_mcp,
         timeout_budget=context.tool_timeout_seconds,
     )
     return len(context.registry.tools) - before_count

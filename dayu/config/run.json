@@ -47,7 +47,21 @@
     "fetch_truncate_chars": 80000,
     "allow_private_network_url": false,
     "playwright_channel": "chrome",
-    "playwright_storage_state_dir": "output/web_diagnostics/storage_states"
+    "playwright_storage_state_dir": "output/web_diagnostics/storage_states",
+    "tavily_mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://tavily-proxy.sissioy.workers.dev/mcp",
+        "--header",
+        "x-api-key:${AUTH_KEY}"
+      ],
+      "env": {
+        "AUTH_KEY": "{{AUTH_KEY}}"
+      },
+      "tool_name": "tavily-search"
+    }
   },
   "host_config": {
     "store": {

@@ -6,14 +6,24 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+import json
 import os
-from typing import Callable, NotRequired, Optional, Protocol, TypedDict
+from typing import Callable, cast, NotRequired, Optional, Protocol, TypedDict
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
+from dayu.contracts.cancellation import CancelledError, CancellationToken
 from dayu.contracts.env_keys import SERPER_API_KEY_ENV, TAVILY_API_KEY_ENV
+from dayu.contracts.tool_configs import McpStdioServerConfig
+from dayu.engine.mcp_stdio_client import (
+    McpJsonObject,
+    McpJsonValue,
+    call_mcp_tool,
+    is_mcp_server_configured,
+)
 from dayu.log import Log
 
 MODULE = "ENGINE.WEB_SEARCH"
@@ -107,6 +117,7 @@ def search_public_web(
     max_results: int,
     max_search_results: int,
     provider: str,
+    tavily_mcp_config: McpStdioServerConfig | None,
     request_timeout_seconds: float,
     timeout_budget: float | None,
     deadline_monotonic: float | None,
@@ -114,6 +125,7 @@ def search_public_web(
     is_safe_public_url: _PublicUrlSafetyChecker,
     normalize_whitespace: Callable[[str], str],
     resolve_timeout_budget: _TimeoutBudgetResolver,
+    cancellation_token: CancellationToken | None = None,
 ) -> SearchWebOutput:
     """执行公开网页检索并组装 tool 输出。
 
@@ -124,6 +136,7 @@ def search_public_web(
         max_results: 当前调用声明的结果上限。
         max_search_results: tool 注册时声明的最大结果上限。
         provider: provider 选择策略。
+        tavily_mcp_config: 可选 Tavily stdio MCP 服务配置。
         request_timeout_seconds: provider 请求超时秒数。
         timeout_budget: 单次 tool call 总预算。
         deadline_monotonic: 当前调用 deadline。
@@ -131,6 +144,7 @@ def search_public_web(
         is_safe_public_url: 公网 URL 安全校验函数。
         normalize_whitespace: 文本空白规整函数。
         resolve_timeout_budget: timeout 预算解析函数。
+        cancellation_token: 可选 Host 取消令牌。
 
     Returns:
         `search_web` 对外返回字典。
@@ -138,6 +152,7 @@ def search_public_web(
     Raises:
         ValueError: 当 query 或 domains 非法时抛出。
         RuntimeError: 当所有 provider 都失败时抛出。
+        CancelledError: Host 取消当前工具调用时抛出。
     """
 
     normalized_query = query.strip()
@@ -148,9 +163,25 @@ def search_public_web(
     limited_results = max(1, min(int(max_results), max_search_results))
     resolved_provider = _resolve_provider(preferred=provider)
 
-    for candidate_provider in _candidate_providers(resolved_provider):
+    for candidate_provider in _candidate_providers(
+        resolved_provider,
+        tavily_mcp_config=tavily_mcp_config,
+    ):
         try:
-            if candidate_provider == "tavily":
+            if candidate_provider == "tavily_mcp":
+                rows = _search_with_tavily_mcp(
+                    query=normalized_query,
+                    domains=normalized_domains,
+                    recency_days=recency_days,
+                    max_results=limited_results,
+                    config=tavily_mcp_config,
+                    timeout_seconds=request_timeout_seconds,
+                    timeout_budget=timeout_budget,
+                    deadline_monotonic=deadline_monotonic,
+                    cancellation_token=cancellation_token,
+                    resolve_timeout_budget=resolve_timeout_budget,
+                )
+            elif candidate_provider == "tavily":
                 rows = _search_with_tavily(
                     query=normalized_query,
                     domains=normalized_domains,
@@ -183,6 +214,8 @@ def search_public_web(
                     normalize_whitespace=normalize_whitespace,
                     resolve_timeout_budget=resolve_timeout_budget,
                 )
+        except CancelledError:
+            raise
         except Exception as exc:  # pragma: no cover - 失败路径由单测通过 monkeypatch 覆盖
             _log_search_provider_failure(
                 candidate_provider=candidate_provider,
@@ -370,18 +403,23 @@ def _resolve_provider(*, preferred: str) -> str:
         ValueError: 当 provider 非法时抛出。
     """
 
-    normalized = preferred.strip().lower() if isinstance(preferred, str) else "auto"
-    allowed = {"auto", "tavily", "serper", "duckduckgo"}
+    normalized = preferred.strip().lower().replace("-", "_") if isinstance(preferred, str) else "auto"
+    allowed = {"auto", "tavily_mcp", "tavily", "serper", "duckduckgo"}
     if normalized not in allowed:
         raise ValueError(f"不支持的 web provider: {preferred}")
     return normalized
 
 
-def _candidate_providers(provider: str) -> list[str]:
+def _candidate_providers(
+    provider: str,
+    *,
+    tavily_mcp_config: McpStdioServerConfig | None = None,
+) -> list[str]:
     """获取 provider 候选顺序。
 
     Args:
         provider: 已归一化 provider。
+        tavily_mcp_config: 可选 Tavily stdio MCP 服务配置。
 
     Returns:
         候选 provider 列表。
@@ -392,13 +430,164 @@ def _candidate_providers(provider: str) -> list[str]:
 
     if provider == "auto":
         candidates: list[str] = []
+        if is_mcp_server_configured(tavily_mcp_config):
+            candidates.append("tavily_mcp")
         if _has_configured_search_provider_api_key("tavily"):
             candidates.append("tavily")
         if _has_configured_search_provider_api_key("serper"):
             candidates.append("serper")
         candidates.append("duckduckgo")
         return candidates
-    return [provider, "duckduckgo"] if provider in {"tavily", "serper"} else ["duckduckgo"]
+    return [provider, "duckduckgo"] if provider in {"tavily_mcp", "tavily", "serper"} else ["duckduckgo"]
+
+
+def _build_tavily_mcp_arguments(
+    *,
+    query: str,
+    domains: list[str],
+    recency_days: Optional[int],
+    max_results: int,
+) -> McpJsonObject:
+    """构造 Tavily MCP 搜索参数。
+
+    Args:
+        query: 检索关键词。
+        domains: 域名过滤。
+        recency_days: 最近天数。
+        max_results: 返回数量。
+
+    Returns:
+        ``tavily_search`` 参数对象。
+
+    Raises:
+        无。
+    """
+
+    arguments: McpJsonObject = {
+        "query": query,
+        "search_depth": "advanced",
+        # Tavily MCP 当前 schema 的最小值为 5；外层仍会按用户请求截断。
+        "max_results": max(5, max_results),
+    }
+    if domains:
+        arguments["include_domains"] = [cast(McpJsonValue, domain) for domain in domains]
+    if recency_days is not None and recency_days >= 0:
+        arguments["start_date"] = (date.today() - timedelta(days=recency_days)).isoformat()
+    return arguments
+
+
+def _extract_tavily_mcp_payload(result: McpJsonObject) -> McpJsonObject:
+    """从 MCP ``tools/call`` 结果提取 Tavily JSON 对象。
+
+    Args:
+        result: MCP ``tools/call`` 的 result 对象。
+
+    Returns:
+        Tavily 搜索响应对象。
+
+    Raises:
+        RuntimeError: 远端返回业务错误或缺少可解析 JSON 时抛出。
+    """
+
+    raw_is_error = result.get("isError")
+    is_error = raw_is_error is True
+    structured_content = result.get("structuredContent")
+    if isinstance(structured_content, dict) and not is_error:
+        return cast(McpJsonObject, structured_content)
+
+    content = result.get("content")
+    text_blocks: list[str] = []
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            text_value = block.get("text")
+            if isinstance(text_value, str) and text_value.strip():
+                text_blocks.append(text_value.strip())
+    if is_error:
+        detail = "\n".join(text_blocks) or "远端 Tavily MCP 返回错误"
+        raise RuntimeError(detail)
+    for text_value in text_blocks:
+        try:
+            decoded: McpJsonValue = cast(McpJsonValue, json.loads(text_value))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            return cast(McpJsonObject, decoded)
+    raise RuntimeError("Tavily MCP 响应中没有可解析的 JSON 对象")
+
+
+def _search_with_tavily_mcp(
+    *,
+    query: str,
+    domains: list[str],
+    recency_days: Optional[int],
+    max_results: int,
+    config: McpStdioServerConfig | None,
+    timeout_seconds: float,
+    timeout_budget: float | None = None,
+    deadline_monotonic: float | None = None,
+    cancellation_token: CancellationToken | None = None,
+    resolve_timeout_budget: _TimeoutBudgetResolver = _default_resolve_timeout_budget,
+) -> list[SearchResultRow]:
+    """通过 stdio MCP 调用 Tavily 搜索。
+
+    Args:
+        query: 检索关键词。
+        domains: 域名过滤。
+        recency_days: 最近天数。
+        max_results: 返回数量。
+        config: Tavily stdio MCP 服务配置。
+        timeout_seconds: MCP 初始化与工具调用的基础超时秒数。
+        timeout_budget: Runner 注入的单次 tool call 总预算。
+        deadline_monotonic: 当前工具调用的单调时钟 deadline。
+        cancellation_token: 可选 Host 取消令牌。
+        resolve_timeout_budget: timeout 预算解析函数。
+
+    Returns:
+        结果列表。
+
+    Raises:
+        RuntimeError: MCP 未配置、协议失败或响应非法时抛出。
+        TimeoutError: MCP 调用超时时抛出。
+        CancelledError: Host 取消当前工具调用时抛出。
+    """
+
+    if config is None:
+        raise RuntimeError("Tavily MCP 未配置")
+    resolved_timeout = resolve_timeout_budget(
+        timeout_seconds,
+        timeout_budget=timeout_budget,
+        deadline_monotonic=deadline_monotonic,
+    )
+    result = call_mcp_tool(
+        config=config,
+        arguments=_build_tavily_mcp_arguments(
+            query=query,
+            domains=domains,
+            recency_days=recency_days,
+            max_results=max_results,
+        ),
+        timeout_seconds=resolved_timeout,
+        cancellation_token=cancellation_token,
+    )
+    payload = _extract_tavily_mcp_payload(result)
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, list):
+        return []
+    rows: list[SearchResultRow] = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "title": str(item.get("title", "")).strip(),
+                "url": str(item.get("url", "")).strip(),
+                "snippet": str(item.get("content", "")).strip(),
+                "published_date": str(item.get("published_date", "")).strip(),
+            }
+        )
+    return rows
 
 
 def _search_with_tavily(

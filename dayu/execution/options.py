@@ -21,6 +21,7 @@ from dayu.contracts.tool_configs import (
     build_doc_tool_limits,
     build_fins_tool_limits,
     build_legacy_toolset_configs,
+    build_mcp_stdio_server_config,
     build_web_tools_config,
 )
 from dayu.contracts.toolset_config import (
@@ -1294,6 +1295,10 @@ def build_base_execution_options(
     merged_doc_limits = _merge_section(asdict(_DEFAULT_RUN_CONFIG.doc_tool_limits), run_config.get("doc_tool_limits"))
     merged_fins_limits = _merge_section(asdict(_DEFAULT_RUN_CONFIG.fins_tool_limits), run_config.get("fins_tool_limits"))
     merged_web = _merge_section(asdict(_DEFAULT_RUN_CONFIG.web_tools_config), run_config.get("web_tools_config"))
+    merged_tavily_mcp = build_mcp_stdio_server_config(
+        cast(ToolsetConfigValue, merged_web.pop("tavily_mcp", None)),
+        field_name="web_tools_config.tavily_mcp",
+    )
     merged_web["playwright_storage_state_dir"] = _resolve_optional_workspace_path(
         merged_web.get("playwright_storage_state_dir"),
         workspace_dir=workspace_dir,
@@ -1310,7 +1315,10 @@ def build_base_execution_options(
         toolset_configs=build_legacy_toolset_configs(
             doc_tool_limits=DocToolLimits(**merged_doc_limits),
             fins_tool_limits=FinsToolLimits(**merged_fins_limits),
-            web_tools_config=WebToolsConfig(**merged_web),
+            web_tools_config=WebToolsConfig(
+                **merged_web,
+                tavily_mcp=merged_tavily_mcp,
+            ),
         ),
         trace_settings=TraceSettings(
             enabled=bool(merged_trace["enabled"]),
@@ -1426,6 +1434,7 @@ def merge_execution_options(
             allow_private_network_url=web_tools_config.allow_private_network_url,
             playwright_channel=web_tools_config.playwright_channel,
             playwright_storage_state_dir=web_tools_config.playwright_storage_state_dir,
+            tavily_mcp=web_tools_config.tavily_mcp,
         )
 
     trace_enabled = base_options.trace_settings.enabled

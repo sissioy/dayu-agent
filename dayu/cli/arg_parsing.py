@@ -674,7 +674,7 @@ def _create_parser() -> argparse.ArgumentParser:
     _add_fins_process_single_args(process_material_parser)
 
     # 初始化子命令
-    init_parser = subparsers.add_parser("init", help="初始化工作区并配置模型供应商")
+    init_parser = subparsers.add_parser("init", help="初始化工作区并配置模型与联网检索")
     init_parser.add_argument(
         "--base", "-b",
         type=str,

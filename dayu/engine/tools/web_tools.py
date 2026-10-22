@@ -38,6 +38,7 @@ from urllib3.exceptions import ReadTimeoutError as Urllib3ReadTimeoutError
 from dayu.contracts.cancellation import CancellationToken
 from dayu.contracts.env_keys import SEC_USER_AGENT_ENV
 from dayu.contracts.protocols import ToolExecutionContext
+from dayu.contracts.tool_configs import McpStdioServerConfig
 from dayu.log import Log
 from dayu.engine.processors.html_pipeline import HtmlPipelineStageError, convert_html_to_llm_markdown
 from dayu.engine.tool_contracts import ToolSchema, ToolTruncateSpec
@@ -774,19 +775,21 @@ def register_web_tools(
     allow_private_network_url: bool = False,
     playwright_channel: str | None = "chrome",
     playwright_storage_state_dir: str = "",
+    tavily_mcp_config: McpStdioServerConfig | None = None,
     timeout_budget: float | None = None,
 ) -> None:
     """向工具注册表注册联网检索工具。
 
     Args:
         registry: 工具注册表实例。
-        provider: Provider 选择策略，支持 ``auto``、``tavily``、``serper``、``duckduckgo``。
+        provider: Provider 选择策略，支持 ``auto``、``tavily-mcp``、``tavily``、``serper``、``duckduckgo``。
         request_timeout_seconds: HTTP 请求超时秒数（搜索与网页下载共用）。
         max_search_results: search_web 返回结果数量上限。
         fetch_truncate_chars: fetch_web_page 内容截断字符上限。
         allow_private_network_url: 是否允许访问内网/本地网络 URL。
         playwright_channel: 浏览器回退使用的 Chromium channel；空字符串表示不指定。
         playwright_storage_state_dir: 浏览器回退可选 storage state 目录；目录内按 host 自动查找 `<host>.json`。
+        tavily_mcp_config: 可选 Tavily stdio MCP 服务配置。
         timeout_budget: Runner 为单次 tool call 提供的预算秒数。
 
     Returns:
@@ -801,6 +804,7 @@ def register_web_tools(
         request_timeout_seconds=request_timeout_seconds,
         max_search_results=max_search_results,
         allow_private_network_url=allow_private_network_url,
+        tavily_mcp_config=tavily_mcp_config,
         timeout_budget=timeout_budget,
     )
     registry.register(name_search, func_search, schema_search)
@@ -824,6 +828,7 @@ def _create_search_web_tool(
     request_timeout_seconds: float,
     max_search_results: int,
     allow_private_network_url: bool = False,
+    tavily_mcp_config: McpStdioServerConfig | None = None,
     timeout_budget: float | None = None,
 ) -> tuple[str, Any, Any]:
     """创建 `search_web` 工具。
@@ -834,6 +839,7 @@ def _create_search_web_tool(
         request_timeout_seconds: HTTP 请求超时秒数（闭包传入）。
         max_search_results: 结果数量上限（闭包传入，同时影响 schema 约束）。
         allow_private_network_url: 是否允许访问内网/本地网络 URL。
+        tavily_mcp_config: 可选 Tavily stdio MCP 服务配置。
         timeout_budget: Runner 为单次 tool call 提供的预算秒数（闭包传入）。
 
     Returns:
@@ -880,6 +886,7 @@ def _create_search_web_tool(
         tags={"web"},
         display_name="联网搜索",
         summary_params=["query"],
+        execution_context_param_name="execution_context",
         truncate=ToolTruncateSpec(
             enabled=True,
             strategy="list_items",
@@ -892,6 +899,7 @@ def _create_search_web_tool(
         domains: Optional[list[str]] = None,
         recency_days: Optional[int] = None,
         max_results: int = 8,
+        execution_context: ToolExecutionContext | None = None,
     ) -> SearchWebOutput:
         """联网检索公开网页。
 
@@ -900,6 +908,7 @@ def _create_search_web_tool(
             domains: 可选域名过滤。
             recency_days: 可选最近天数过滤。
             max_results: 返回结果上限。
+            execution_context: Host 注入的工具执行上下文。
 
         Returns:
             检索结果字典。
@@ -909,6 +918,11 @@ def _create_search_web_tool(
             RuntimeError: 当所有 provider 均失败时抛出。
         """
 
+        effective_timeout_budget = (
+            execution_context.timeout_seconds
+            if execution_context is not None and execution_context.timeout_seconds is not None
+            else timeout_budget
+        )
         return search_public_web(
             query=query,
             domains=domains,
@@ -916,13 +930,19 @@ def _create_search_web_tool(
             max_results=max_results,
             max_search_results=max_search_results,
             provider=provider,
+            tavily_mcp_config=tavily_mcp_config,
             request_timeout_seconds=request_timeout_seconds,
-            timeout_budget=timeout_budget,
-            deadline_monotonic=_compute_deadline_monotonic(timeout_budget),
+            timeout_budget=effective_timeout_budget,
+            deadline_monotonic=_compute_deadline_monotonic(effective_timeout_budget),
             allow_private_network_url=allow_private_network_url,
             is_safe_public_url=_is_safe_public_url,
             normalize_whitespace=_normalize_whitespace,
             resolve_timeout_budget=_resolve_timeout_budget,
+            cancellation_token=(
+                execution_context.cancellation_token
+                if execution_context is not None
+                else None
+            ),
         )
 
     return _build_registered_tool_parts(search_web)
